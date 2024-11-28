@@ -4,6 +4,6 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-crypto = { version = "0.0.4", path = "../package/crypto-v0.0.4" }
+crypto = { version = "0.0.4", path = "../stable-packages/crypto-v0.0.4" }
 rand_core = { version = "*", features = ["getrandom"] }
 rand_chacha = "*"

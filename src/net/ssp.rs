@@ -1,61 +1,232 @@
 use crypto::crypto::DiffieHellman;
 use crypto::crypto::DigitalSignature;
-use crypto::crypto::Hash;
+use crypto::crypto::Hash as HashTrait;
 use crypto::crypto::ed25519::Ed25519;
 use crypto::crypto::sha3::Sha3256;
 use crypto::crypto::x25519::X25519;
 use rand_core::RngCore;
 use rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use std::clone::Clone;
-use std::marker::Copy;
 use crate::crypto::aead::Aes256Gcm;
-use crate::net::NetworkError;
-use crate::net::NetworkErrorCode;
+use crate::crypto::hash::Hash;
+use crate::crypto::hash::HashAlgorithm;
+use crate::net::error::NetworkError;
+use crate::net::error::NetworkErrorCode;
 
-// Network Stream Protection Protocol
+const BUF_LEN: usize = 0;
 
-pub struct Stream {
+pub struct SspStream {
+    state: SspState,
     version: Version,
     cipher_suite: CipherSuite,
-    ke_privkey: [u8; 32],
-    au_privkey: [u8; 32],
+    secrets: HelloSecrets,
+    send_buf: [u8; BUF_LEN],
+    recv_buf: [u8; BUF_LEN],
+    hash: Hash
 }
 
-impl Stream {
+struct HelloSecrets {
+    ke_privkey_len: usize,
+    ke_privkey: [u8; 32],
+    au_privkey_len: usize,
+    au_privkey: [u8; 32]
+}
 
-    // pub fn new(version: Version, cipher_suite: CipherSuite) -> Result<Self, NetworkError> {
+#[derive(PartialEq)]
+pub enum SspState {
+    Initial,
+    WaitHello,
+    RecvHello,
+    WaitHelloDone,
+    RecvHelloDone,
+    BidiUserStream,
+    SentBye,
+    RecvBye,
+    Closed,
+}
+
+impl SspState {
+
+    fn can_send_hello(&self) -> bool {
+        return *self == Self::Initial || *self == Self::RecvHello;
+    }
+
+    fn can_recv_hello(&self) -> bool {
+        return *self == Self::Initial || *self == Self::WaitHello;
+    }
+
+    fn can_send_hello_done(&self) -> bool {
+        return *self == Self::RecvHello || *self == Self::RecvHelloDone; // roleによってかわる
+    }
+
+    fn can_recv_hello_done(&self) -> bool {
+        return *self == Self::WaitHelloDone;
+    }
+
+    fn can_send_user_stream(&self) -> bool {
+        return *self == Self::BidiUserStream || *self == Self::RecvBye;
+    }
+
+    fn can_recv_user_stream(&self) -> bool {
+        return *self == Self::BidiUserStream || *self == Self::SentBye;
+    }
+
+    // fn can_send_hello_bye(&self) -> bool {
 //
-    //     return Ok(Self{
-    //         version: version,
-    //         cipher_suite: cipher_suite
-    //     });
+    // }
+//
+    // fn can_recv_hello_bye(&self) -> bool {
 //
     // }
 
-    // pub fn read(in_buf: &[u8], out_buf: &mut [u8]) -> Result<usize, NetworkError> {
-    //     return if in_buf.len() < 1 {
-    //         Ok(0)
-    //     } else {
-    //         match FragmentType::from_u8(in_buf[0])? {
-    //             FragmentType::Hello      => recv_hello_fragment(),
-    //             FragmentType::HelloDone  => recv_hello_done_fragment(),
-    //             FragmentType::UserStream => recv_user_stream_fragment(),
-    //         }
-    //     };
-    // }
-//
-    // pub fn write(in_buf: &[u8], out_buf: &mut [u8]) -> Result<usize, NetworkError> {
-//
-    //     if in_buf.len() == 0 || out_buf.len() == 0 {
-    //         return Ok(0);
-    //     }
-//
-    // }
+}
 
-    // pub fn fin() -> Result<(), NetworkError> {
-//
-    // }
+impl Clone for SspState {
+    fn clone(&self) -> Self { return *self; }
+}
+
+impl Copy for SspState {}
+
+impl SspStream {
+
+    pub fn new(version: Version, cipher_suite: CipherSuite, au_privkey: &[u8]) -> Result<Self, NetworkError> {
+
+        let c: CipherSuiteConstants = cipher_suite.constants();
+
+        if !match version {
+            Version::Version1 => match cipher_suite {
+                CipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256 => true,
+                _                                                => false
+            },
+            _                                                    => false
+        } {
+            return Err(NetworkError::new(NetworkErrorCode::IllegalCipherSuite));
+        }
+
+        if au_privkey.len() != c.au_privkey_len {
+            return Err(NetworkError::new(NetworkErrorCode::BufferLengthIncorrect));
+        }
+
+        let mut v: Self = Self{
+            state: SspState::Initial,
+            version: version,
+            cipher_suite: cipher_suite,
+            secrets: HelloSecrets{
+                ke_privkey_len: c.ke_privkey_len,
+                ke_privkey: [0; 32],
+                au_privkey_len: c.au_privkey_len,
+                au_privkey: [0; 32]
+            },
+            send_buf: [0; BUF_LEN],
+            recv_buf: [0; BUF_LEN],
+            hash: cipher_suite.hash()
+        };
+
+        v.secrets.au_privkey[..c.au_privkey_len].copy_from_slice(au_privkey);
+        let mut csprng: ChaCha20Rng = ChaCha20Rng::from_entropy();
+        csprng.fill_bytes(&mut v.secrets.ke_privkey[..c.ke_privkey_len]);
+
+        return Ok(v);
+
+    }
+
+    pub fn hello_phase_send(&mut self, buf: &mut [u8]) -> Result<(usize, SspState), NetworkError> {
+        return match self.state {
+            SspState::Initial        => self.send_hello(buf), // initiator only
+            SspState::RecvHello      => self.send_hello(buf), // acceptor only
+            SspState::RecvHelloDone  => self.send_hello_done(buf),
+            SspState::BidiUserStream => Ok((0, SspState::BidiUserStream)),
+            _                        => Err(NetworkError::new(NetworkErrorCode::UnsuitableState))
+        };
+    }
+
+    pub fn hello_phase_recv(&mut self, buf: &[u8]) -> Result<(usize, SspState), NetworkError> {
+        return match self.state {
+            SspState::Initial        => self.recv_hello(buf), // acceptor only
+            SspState::WaitHello      => self.recv_hello(buf), // initiator only
+            SspState::WaitHelloDone  => self.recv_hello_done(buf),
+            SspState::BidiUserStream => Ok((0, SspState::BidiUserStream)),
+            _                        => Err(NetworkError::new(NetworkErrorCode::UnsuitableState))
+        };
+    }
+
+    pub fn send(&mut self, in_buf: &[u8], out_buf: &mut [u8]) -> Result<usize, NetworkError> {
+
+        if self.state.can_send_user_stream() {
+            return Err(NetworkError::new(NetworkErrorCode::UserStreamIsNotReady));
+        }
+
+        return Ok(0);
+
+    }
+
+    pub fn recv(&mut self, in_buf: &[u8], out_buf: &mut [u8]) -> Result<usize, NetworkError> {
+
+        if self.state.can_recv_user_stream() {
+            return Err(NetworkError::new(NetworkErrorCode::UserStreamIsNotReady));
+        }
+
+        return Ok(0);
+
+    }
+
+    pub fn send_bye(&mut self, buf: &[u8]) -> Result<(), NetworkError> {
+
+        self.state = match self.state {
+            SspState::BidiUserStream => SspState::SentBye,
+            SspState::RecvBye        => SspState::Closed,
+            _                        => {
+                return Err(NetworkError::new(NetworkErrorCode::UnsuitableState));
+            }
+        };
+
+        return Ok(());
+
+    }
+
+    fn send_hello(&mut self, buf: &mut [u8]) -> Result<(usize, SspState), NetworkError> {
+
+        if !self.state.can_send_hello() {
+            return Err(NetworkError::new(NetworkErrorCode::UnsuitableState));
+        }
+
+        let h: HelloFragment = HelloFragment::new(self.version, self.cipher_suite, &self.secrets)?;
+        let s: usize = h.to_bytes(&mut buf[..])?;
+
+        self.state = if self.state == SspState::Initial {
+            SspState::WaitHello
+        } else {
+            SspState::WaitHelloDone
+        };
+
+        return Ok((s, self.state));
+
+    }
+
+    fn recv_hello(&mut self, buf: &[u8]) -> Result<(usize, SspState), NetworkError> {
+
+        let h: HelloFragment = HelloFragment::from_bytes(buf)?;
+
+
+
+
+        return Ok((0, self.state));
+
+    }
+
+    fn send_hello_done(&mut self, buf: &mut [u8]) -> Result<(usize, SspState), NetworkError> {
+
+        // let h: HelloDoneFragment = HelloDoneFragment::new(self.version, self.cipher_suite, &self.secrets)?;
+        // return h.to_bytes(&mut buf[..]);
+        return Ok((0, self.state));
+    }
+
+    fn recv_hello_done(&mut self, buf: &[u8]) -> Result<(usize, SspState), NetworkError> {
+
+        // let h: HelloDoneFragment = HelloDoneFragment::from_bytes(buf)?;
+        return Ok((0, self.state));
+
+    }
 
 }
 
@@ -144,7 +315,7 @@ impl Clone for FragmentType {
 
 impl Copy for FragmentType {}
 
-enum Version {
+pub enum Version {
     Null     = 0x00000000,
     Version1 = 0x00000001,
 }
@@ -212,16 +383,10 @@ impl Serializable for Version {
 }
 
 #[allow(non_camel_case_types)]
-enum CipherSuite {
+pub enum CipherSuite {
     NULL_NULL_NULL_NULL                 = 0x0000000000000000,
     X25519_Ed25519_AES_128_GCM_SHA3_256 = 0x0000000000000001,
 }
-
-impl Clone for CipherSuite {
-    fn clone(&self) -> Self { return *self; }
-}
-
-impl Copy for CipherSuite {}
 
 impl CipherSuite {
 
@@ -243,6 +408,12 @@ impl CipherSuite {
     }
 
 }
+
+impl Clone for CipherSuite {
+    fn clone(&self) -> Self { return *self; }
+}
+
+impl Copy for CipherSuite {}
 
 impl Serializable for CipherSuite {
 
@@ -352,7 +523,7 @@ struct HelloFragment {
 
 impl HelloFragment {
 
-    fn new(version: Version, cipher_suite: CipherSuite, ke_privkey: &[u8], au_privkey: &[u8]) -> Result<Self, NetworkError> {
+    fn new(version: Version, cipher_suite: CipherSuite, secrets: &HelloSecrets) -> Result<Self, NetworkError> {
 
         let mut v: Self =  Self{
             base: FragmentBaseFields::new(FragmentType::Hello),
@@ -373,22 +544,32 @@ impl HelloFragment {
             CipherSuite::NULL_NULL_NULL_NULL => Err(NetworkError::new(NetworkErrorCode::IllegalCipherSuite)),
             CipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256 => {
 
-                if ke_privkey.len() != c.ke_privkey_len || au_privkey.len() != c.au_privkey_len {
+                if secrets.ke_privkey.len() != c.ke_privkey_len || secrets.au_privkey.len() != c.au_privkey_len {
                     return Err(NetworkError::new(NetworkErrorCode::BufferLengthIncorrect));
                 }
 
                 let sign_input: [u8; 0] = [];
                 // msg := (au_signature以外のfrag)
 
-                if let Err(_) = X25519::compute_public_key(ke_privkey, &mut v.ke_pubkey[..c.ke_pubkey_len]) {
+                if let Err(_) = X25519::compute_public_key(
+                    &secrets.ke_privkey[..secrets.ke_privkey_len],
+                    &mut v.ke_pubkey[..c.ke_pubkey_len]
+                ) {
                     return Err(NetworkError::new(NetworkErrorCode::CryptoErrorOccurred));
                 }
 
-                if let Err(_) = Ed25519::compute_public_key_oneshot(au_privkey, &mut v.au_pubkey[..c.au_pubkey_len]) {
+                if let Err(_) = Ed25519::compute_public_key_oneshot(
+                    &secrets.au_privkey[..secrets.au_privkey_len],
+                    &mut v.au_pubkey[..c.au_pubkey_len]
+                ) {
                     return Err(NetworkError::new(NetworkErrorCode::CryptoErrorOccurred));
                 }
 
-                if let Err(_) = Ed25519::sign_oneshot(au_privkey, &sign_input[..], &mut v.au_signature[..c.au_signature_len]) {
+                if let Err(_) = Ed25519::sign_oneshot(
+                    &secrets.au_privkey[..secrets.au_privkey_len],
+                    &sign_input[..],
+                    &mut v.au_signature[..c.au_signature_len]
+                ) {
                     return Err(NetworkError::new(NetworkErrorCode::CryptoErrorOccurred));
                 }
 
@@ -458,30 +639,16 @@ impl Serializable for HelloFragment {
         self.base.to_bytes(&mut buf[..]).unwrap();
         self.version.to_bytes(&mut buf[4..]).unwrap();
         self.cipher_suite.to_bytes(&mut buf[8..]).unwrap();
-        let t1: usize = 16 + c.ke_pubkey_len;
+        let t1: usize = 80 + c.ke_pubkey_len;
         let t2: usize = t1 + c.au_pubkey_len;
-        buf[16..t1].copy_from_slice(&self.ke_pubkey[..c.ke_pubkey_len]);
+        buf[16..80].copy_from_slice(&self.random[..]);
+        buf[80..t1].copy_from_slice(&self.ke_pubkey[..c.ke_pubkey_len]);
         buf[t1..t2].copy_from_slice(&self.au_pubkey[..c.au_pubkey_len]);
         buf[t2..(t2 + c.au_signature_len)].copy_from_slice(&self.au_signature[..c.au_signature_len]);
 
         return Ok(len);
 
     }
-
-}
-
-fn send_hello_fragment(strm: Stream) {
-
-
-
-    // client と server　で、署名のINPUTってどうしたらいいの？？？　SSHとか勉強したほうがいいな
-
-
-
-
-}
-
-fn recv_hello_fragment() {
 
 }
 
@@ -523,7 +690,14 @@ impl CipherSuite {
                 aead_tag_len: Aes256Gcm::TAG_LEN,
                 hash_msg_dgst_len: Sha3256::MESSAGE_DIGEST_LEN
             },
-        }
+        };
+    }
+
+    fn hash(&self) -> Hash {
+        return match self {
+            Self::NULL_NULL_NULL_NULL                 => Hash::new(HashAlgorithm::Null),
+            Self::X25519_Ed25519_AES_128_GCM_SHA3_256 => Hash::new(HashAlgorithm::Sha3256),
+        };
     }
 
 }
