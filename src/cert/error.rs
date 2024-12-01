@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::Display;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum CertErrorCode {
 
     // general

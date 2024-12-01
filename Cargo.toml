@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-netpkg = { package = "tspp", version = "0.0.1", path = "../tspp" }
+tspppkg = { package = "tspp", version = "0.0.1", path = "../tspp" }
 cryptopkg = { package = "crypto", version = "0.0.5", path = "../stable-packages/crypto-v0.0.5" }
 rand_core = { version = "*", features = ["getrandom"] }
 rand_chacha = "*"

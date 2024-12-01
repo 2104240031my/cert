@@ -28,10 +28,12 @@ const MAX_AEAD_NONCE_LEN: usize          = Aes256Gcm::MAX_NONCE_LEN;
 const MAX_AEAD_TAG_LEN: usize            = Aes256Gcm::TAG_LEN;
 const MAX_HASH_MESSAGE_DIGEST_LEN: usize = Sha3256::MESSAGE_DIGEST_LEN;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AeadAlgorithm {
     Aes256Gcm = 0x00000001,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SignAlgorithm {
     Ed25519 = 0x00000001,
 }
@@ -46,11 +48,28 @@ impl SignAlgorithm {
         };
     }
 
+    pub fn to_bytes(&self, buf: &mut [u8]) -> Result<usize, CertError> {
+
+        if buf.len() < Self::BYTES_LEN {
+            return Err(CertError::new(CertErrorCode::BufferTooShort));
+        }
+
+        buf[0..4].copy_from_slice(&(*self as u32).to_be_bytes());
+
+        return Ok(Self::BYTES_LEN);
+
+    }
+
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum CertificateType {
     SubjectAuthOnly = 0x0001,
     // SubjectAuthAndSubjectSignKey = 0x0002,
+}
+
+impl CertificateType {
+    pub const BYTES_LEN: usize = 2;
 }
 
 pub enum Certificate {
@@ -71,6 +90,10 @@ struct CertificateCommonHeader {
     length: u16, // length from self.cert_type to self.signature
 }
 
+struct IdentityFixedU64 {
+    inner: u64
+}
+
 struct ValidityPeriodFixedU64Pair {
     not_before: u64,
     not_after: u64
@@ -83,11 +106,29 @@ pub struct CertificateSubjectAuthOnly {
     sign_algo: SignAlgorithm,
     key_pair_id: Vec<u8>,
     random: [u8; 64],
-    identity: u64,
+    identity: IdentityFixedU64,
     validity_period: ValidityPeriodFixedU64Pair,
     // --- to here ---
 
     signature: [u8; MAX_SIGN_SIGNATURE_LEN]
+
+}
+
+impl IdentityFixedU64 {
+
+    pub const BYTES_LEN: usize = 8;
+
+    pub fn to_bytes(&self, buf: &mut [u8]) -> Result<usize, CertError> {
+
+        if buf.len() < Self::BYTES_LEN {
+            return Err(CertError::new(CertErrorCode::BufferTooShort));
+        }
+
+        buf[0..8].copy_from_slice(&self.inner.to_be_bytes());
+
+        return Ok(Self::BYTES_LEN);
+
+    }
 
 }
 
@@ -97,17 +138,14 @@ impl ValidityPeriodFixedU64Pair {
 
     pub fn to_bytes(&self, buf: &mut [u8]) -> Result<usize, CertError> {
 
-        if buf.len() < 16 {
+        if buf.len() < Self::BYTES_LEN {
             return Err(CertError::new(CertErrorCode::BufferTooShort));
         }
 
-        let not_before: [u8; 8] = self.not_before.to_be_bytes();
-        let not_after: [u8; 8] = self.not_after.to_be_bytes();
+        buf[0..8].copy_from_slice(&self.not_before.to_be_bytes());
+        buf[8..16].copy_from_slice(&self.not_after.to_be_bytes());
 
-        buf[0..8].copy_from_slice(&not_before[..]);
-        buf[8..16].copy_from_slice(&not_after[..]);
-
-        return Ok(16);
+        return Ok(Self::BYTES_LEN);
 
     }
 
@@ -115,15 +153,18 @@ impl ValidityPeriodFixedU64Pair {
 
 impl CertificateCommonHeader {
 
-    pub const BYTES_LEN: usize = 4;
+    pub const BYTES_LEN: usize = CertificateType::BYTES_LEN + 2;
 
     pub fn to_bytes(&self, buf: &mut [u8]) -> Result<usize, CertError> {
 
-        if buf.len() < 4 {
+        if buf.len() < Self::BYTES_LEN {
             return Err(CertError::new(CertErrorCode::BufferTooShort));
         }
 
-        return Ok(4);
+        buf[0..2].copy_from_slice(&(self.cert_type as u16).to_be_bytes());
+        buf[2..4].copy_from_slice(&self.length.to_be_bytes());
+
+        return Ok(Self::BYTES_LEN);
 
     }
 
@@ -134,7 +175,7 @@ impl CertificateSubjectAuthOnly {
     pub fn new(sign_algo: SignAlgorithm, key_pair_id: &[u8], identity: u64, not_before: u64,
         not_after: u64) -> Result<Self, CertError> {
 
-        let len: usize =
+        let len =
             CertificateCommonHeader::BYTES_LEN +
             SignAlgorithm::BYTES_LEN +
             key_pair_id.len() +
@@ -143,7 +184,7 @@ impl CertificateSubjectAuthOnly {
             ValidityPeriodFixedU64Pair::BYTES_LEN +
             sign_algo.signature_len();
 
-        let mut v: Self = Self{
+        let mut v = Self{
             common: CertificateCommonHeader{
                 cert_type: CertificateType::SubjectAuthOnly,
                 length: len as u16,
@@ -151,7 +192,7 @@ impl CertificateSubjectAuthOnly {
             sign_algo: sign_algo,
             key_pair_id: Vec::<u8>::with_capacity(key_pair_id.len()),
             random: [0; 64],
-            identity: identity,
+            identity: IdentityFixedU64{ inner: identity },
             validity_period: ValidityPeriodFixedU64Pair{
                 not_before: not_before,
                 not_after: not_after
@@ -161,7 +202,7 @@ impl CertificateSubjectAuthOnly {
 
         v.key_pair_id.copy_from_slice(key_pair_id);
 
-        let mut csprng: ChaCha20Rng = ChaCha20Rng::from_entropy();
+        let mut csprng = ChaCha20Rng::from_entropy();
         csprng.fill_bytes(&mut v.random[..]);
 
         return Ok(v);
@@ -170,7 +211,7 @@ impl CertificateSubjectAuthOnly {
 
     pub fn to_bytes(&self, buf: &mut [u8]) -> Result<usize, CertError> {
 
-        let len: usize =
+        let len =
             CertificateCommonHeader::BYTES_LEN +
             SignAlgorithm::BYTES_LEN +
             self.key_pair_id.len() +
@@ -179,36 +220,29 @@ impl CertificateSubjectAuthOnly {
             ValidityPeriodFixedU64Pair::BYTES_LEN +
             self.sign_algo.signature_len();
 
-/*        if buf.len() < len {
+        if buf.len() < len {
             return Err(CertError::new(CertErrorCode::BufferTooShort));
         }
 
-        buf[0] = self.sign_algo as u8;
-        buf[1] = self.sign_algo as u8;
-        buf[2] = self.sign_algo as u8;
+        self.common.to_bytes(&mut buf[..]).unwrap();
+        self.sign_algo.to_bytes(&mut buf[CertificateCommonHeader::BYTES_LEN..]).unwrap();
 
-        buf[bytes.len()..(bytes.len() + 2)].copy_from_slice(&signer_key_pair_id.len().to_be_bytes()[..]);
+        let i = CertificateCommonHeader::BYTES_LEN + SignAlgorithm::BYTES_LEN;
+        buf[i..(i + self.key_pair_id.len())].copy_from_slice(&self.key_pair_id);
 
-        bytes.push(self.sign_algo as u8);
+        let i = i + self.key_pair_id.len();
+        buf[i..(i + 64)].copy_from_slice(&self.random);
 
-        bytes[bytes.len()..(bytes.len() + signer_key_pair_id.len())].copy_from_slice(signer_key_pair_id);
-        bytes[bytes.len()..(bytes.len() + 64)].copy_from_slice(&random[..]);
+        let i = i + 64;
+        self.identity.to_bytes(&mut buf[i..]).unwrap();
 
-        match identity {
-            FixedU64(v) => {
-                bytes.push(IdentityType.FixedU64 as u8);
-                bytes[bytes.len()..(bytes.len() + 8)].copy_from_slice(&v.to_be_bytes()[..]);
-            },
-        }
+        let i = i + IdentityFixedU64::BYTES_LEN;
+        self.validity_period.to_bytes(&mut buf[i..]).unwrap();
 
-        match validity_period {
-            ValidityPeriod(v) => {
-                bytes.push(ValidityPeriodType.FixedU64Pair as u8);
-                bytes[bytes.len()..(bytes.len() + 8)].copy_from_slice(&v.not_before.to_be_bytes()[..]);
-                bytes[bytes.len()..(bytes.len() + 8)].copy_from_slice(&v.not_after.to_be_bytes()[..]);
-            },
-        }
-*/
+        let i = i + ValidityPeriodFixedU64Pair::BYTES_LEN;
+        buf[i..(i + self.signature.len())]
+            .copy_from_slice(&self.signature[..self.sign_algo.signature_len()]);
+
         return Ok(len);
 
     }
