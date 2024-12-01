@@ -1,11 +1,10 @@
-#[allow(dead_code)]
-mod crypto;
+mod cert;
 
-#[allow(dead_code)]
-mod net;
-
-mod test_script;
+use crate::cert::certificate::SignAlgorithm;
+use crate::cert::certificate::CertificateSubjectAuthOnly;
 
 fn main() {
-    test_script::main();
+
+    let cert = CertificateSubjectAuthOnly::new(SignAlgorithm::Ed25519, &[0; 0], 0, 0, 0).unwrap();
+
 }
