@@ -163,12 +163,50 @@ impl CertificateType {
 
 }
 
-pub struct CertificateEnvelope {
-    aead_algo: AeadAlgorithm,
-    aead_nonce: [u8; MAX_AEAD_NONCE_LEN],
-    aead_payload_len: u16,
-    aead_payload: Certificate,
-    aead_tag: [u8; MAX_AEAD_TAG_LEN]
+// pub struct CertificateEnvelope {
+//     aead_algo: AeadAlgorithm,
+//     aead_nonce: [u8; MAX_AEAD_NONCE_LEN],
+//     aead_payload_len: u16,
+//     aead_payload: Certificate,
+//     aead_tag: [u8; MAX_AEAD_TAG_LEN]
+// }
+pub struct CertificateEnvelope;
+
+impl CertificateEnvelope {
+
+    pub fn seal_subject_auth_only(algo: AeadAlgorithm, nonce: &[u8], cert: CertificateSubjectAuthOnly,
+        buf: &mut [u8]) -> Result<usize, CertError> {
+
+        if algo.nonce_len() != nonce.len() {
+            return Err(CertError::new(BufferLengthIncorrect));
+        }
+
+        let len =
+            AeadAlgorithm::BYTES_LEN +
+            algo.nonce_len() +
+            2 +
+            cert.common.length as usize +
+            algo.tag_len();
+
+        if buf.len() < len {
+            return Err(CertError::new(BufferTooShort));
+        }
+
+        let mut buf = [0x00u8; 224];
+        cert.aead_algo.to_bytes().unwrap();
+
+        /*
+
+        TODO here!
+
+        */
+
+        cert.to_bytes(&mut buf[..]).unwrap();
+
+        return Ok(v);
+
+    }
+
 }
 
 pub enum Certificate {
@@ -291,6 +329,7 @@ impl CertificateSubjectAuthOnly {
             return Err(CertError::new(CertErrorCode::BufferTooShort));
         }
 
+        let common = CertificateCommonHeader::from_bytes(&buf[..])?;
         let sign_algo = SignAlgorithm::from_bytes(&buf[CertificateCommonHeader::BYTES_LEN..])?;
         let key_pair_id_len =
             buf[CertificateCommonHeader::BYTES_LEN + SignAlgorithm::BYTES_LEN] as usize;
@@ -299,6 +338,8 @@ impl CertificateSubjectAuthOnly {
         let len = len + key_pair_id_len + signature_len;
         if buf.len() < len {
             return Err(CertError::new(CertErrorCode::BufferTooShort));
+        } else if common.length as usize != len {
+            return Err(CertError::new(CertErrorCode::BufferLengthIncorrect));
         }
 
         let i1 = CertificateCommonHeader::BYTES_LEN + SignAlgorithm::BYTES_LEN + 1;
@@ -308,7 +349,7 @@ impl CertificateSubjectAuthOnly {
         let i5 = i4 + ValidityPeriodFixedU64Pair::BYTES_LEN;
 
         return Ok(Self{
-            common: CertificateCommonHeader::from_bytes(&buf[..])?,
+            common: common,
             sign_algo: sign_algo,
             key_pair_id_len: key_pair_id_len as u8,
             key_pair_id: buf[i1..i2].to_vec(),
