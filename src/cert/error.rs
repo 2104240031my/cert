@@ -12,8 +12,9 @@ pub enum CertErrorCode {
     UnsupportedAlgorithm,
     BufferLengthIncorrect,
     BufferTooShort,
+    SignFailed,
     VerificationFailed,
-
+    UnsupportedCertificateType,
     UnsupportedIdentityType,
     UnsupportedValidityPeriodType,
 
@@ -47,9 +48,11 @@ impl Display for CertError {
             CertErrorCode::UnsupportedAlgorithm                 => "unsupported algorithm",
             CertErrorCode::BufferLengthIncorrect                => "buffer length incorrect",
             CertErrorCode::BufferTooShort => "buffer too short",
+            CertErrorCode::SignFailed           => "SignFailed",
             CertErrorCode::VerificationFailed                   => "verification failed",
             CertErrorCode::UnsupportedIdentityType              => "UnsupportedIdentityType",
             CertErrorCode::UnsupportedValidityPeriodType              => "UnsupportedValidityPeriodType",
+            CertErrorCode::UnsupportedCertificateType           => "UnsupportedCertificateType",
         });
     }
 
